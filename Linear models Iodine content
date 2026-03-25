@@ -1,0 +1,41 @@
+
+## Example for Milk iodine vs Iodine intake 
+
+## df = Iodine
+head(Iodine)
+
+shapiro.test(Iodine$Milk_iodine)
+leveneTest(Milk_iodine~Treatment, data=Iodine)
+
+## Non-parametric
+kruskal.test(Milk_iodine~Treatment, data= Iodine)
+dunn_test(data=Iodine, Milk_iodine~Treatment, p.adjust.method="BH")
+
+# Fit the linear regression model
+model <- lm(Milk_iodine ~ Iodine_intake, data = Iodine)
+
+# Extract R-squared, p-value, and coefficients (slope and intercept)
+r_squared <- summary(model)$r.squared
+p_value <- summary(model)$coefficients[2, 4]
+slope <- coef(model)["Iodine_intake"]
+intercept <- coef(model)["(Intercept)"]
+
+# Create the regression equation as a string
+equation <- paste0("y = ", round(slope, 2), "x + ", round(intercept, 2))
+
+# Create the ggplot with the regression line, color-coded by Treatment
+MilkIodine <- ggplot(Iodine, aes(x = Iodine_intake, y = Milk_iodine, color = Treatment)) +
+  geom_point(size = 3) +  # Scatter plot points
+  geom_smooth(method = "lm", color = "black", se = FALSE) +  # Regression line
+  annotate("text", x = max(Iodine$Iodine_intake) * 0.9, 
+           y = max(Iodine$Milk_iodine) * 0.9,
+           label = paste("R² = ", round(r_squared, 3), 
+                         "\np-value = ", round(p_value, 3), 
+                         "\n", equation),
+           size = 3, color = "black", parse = FALSE) +
+  labs(title = "a)",
+       x = "Iodine Intake (mg/DMI)",
+       y = "Milk Iodine (ug/kg)") +
+  scale_colour_manual(values = c("#333FFC", "#CC0099", "#00CCFF")) +  # Custom colors
+  theme_bw()
+

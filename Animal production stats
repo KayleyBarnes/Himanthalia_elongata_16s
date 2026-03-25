@@ -1,0 +1,423 @@
+## Script for used for animal production, gaseous exchange, nitrogen use efficiency, rumen fermenation parameters. 
+
+# load data
+df <- Nit_Eff_8C
+
+# Convert to factors, dependent and independent variables, ensure variables are named the same as the column names. otherwise it will create a duplicate.
+
+df <- df %>%
+  mutate(
+    Animal_No = as.factor(Animal_No),   
+    Treatment = as.factor(Treatment),
+    Period = as.factor(Period)         
+  )
+
+# Exploratory plots (per response variable, change "Milk") 
+response_vars <- names(df)[which(names(df) == "Milk") : ncol(df)]
+response_vars
+
+# Boxplots by Treatment and Period
+for (resp in response_vars){
+  p <- ggplot(df, aes(x=Treatment, y = .data[[resp]], fill = Treatment)) +
+    geom_boxplot(alpha=0.6) +
+    facet_wrap(~Period) +
+    ggtitle(paste("Boxplot of", resp, "by Treatment and Period")) +
+    theme_minimal()
+  print(p)
+}
+
+# Subject-level spaghetti plot (connect repeated measures)
+for (resp in response_vars){
+  p <- ggplot(df, aes(x = Period, y = .data[[resp]], group = Animal_No, color = Treatment)) +
+    geom_point() + geom_line(alpha = 0.6) +
+    ggtitle(paste("Repeated measures for", resp)) +
+    theme_minimal()
+  print(p)
+}
+
+# Check normality and homogeneity of variances
+
+## Visual normality of residuals: histogram + QQ plot per response
+for (resp in response_vars){
+  v <- df[[resp]]
+  cat("\n---", resp, "---\n")
+  print(ggqqplot(v, title = paste("QQ plot for", resp)))
+  print(ggdensity(v, main = paste("Density for", resp)))
+  # Shapiro-Wilk test (note: sensitive for small sample sizes; do per-group if needed)
+  sh <- tryCatch(shapiro.test(v), error = function(e) NULL)
+  print(sh)
+}
+
+## Levene's test for homogeneity across Treatment and across Period
+for (resp in response_vars){
+  cat("\nLevene tests for", resp, "\n")
+  lev_treat <- leveneTest(as.formula(paste(resp, "~ Treatment")), data = df)
+  print(lev_treat)
+  lev_period <- leveneTest(as.formula(paste(resp, "~ Period")), data = df)
+  print(lev_period)
+}
+
+# Levene by treatment × period cells (if some cells have very small n, interpret with caution)
+for (resp in response_vars){
+  df$cell <- interaction(df$Treatment, df$Period)
+  cat("\nLevene for cells (Treatment:Period) -", resp, "\n")
+  print(leveneTest(as.formula(paste(resp, "~ cell")), data = df))
+  df$cell <- NULL
+}
+
+
+####
+
+# Fit mixed models: base model and interaction test
+# Strategy: fit linear mixed model with Animal as random intercept and fixed effects Treatment, Period, and interaction.
+
+# Prepare results container
+results_list <- list()
+
+sink("mixed_model_results__Nit_Eff_8C.txt")
+
+for (resp in response_vars) {
+  cat("\n===== ANALYSIS for", resp, "=====\n")
+  formula_str <- paste0(resp, " ~ Treatment * Period + (1 | Animal_No)")
+  cat("Model formula:", formula_str, "\n")
+  
+  # Wrap each model fit in tryCatch so a single failure doesn't stop the loop
+  fit_res <- tryCatch({
+    model <- lmer(as.formula(formula_str), data = df, REML = FALSE)
+    
+    # Tidy fixed effects (broom.mixed)
+    model_summary <- tryCatch(
+      broom.mixed::tidy(model, effects = "fixed"),
+      error = function(e) {
+        warning("broom.mixed::tidy failed for ", resp, " : ", e$message)
+        NULL
+      }
+    )
+    
+    # ANOVA (type 3)
+    anova_tab <- tryCatch(
+      anova(model, type = 3),
+      error = function(e) {
+        warning("anova() failed for ", resp, " : ", e$message)
+        NULL
+      }
+    )
+    
+    # emmeans and pairwise contrasts (may fail if model degenerate)
+    emm <- tryCatch(
+      emmeans::emmeans(model, ~ Treatment | Period),
+      error = function(e) {
+        warning("emmeans() failed for ", resp, " : ", e$message)
+        NULL
+      }
+    )
+    
+    pairs_df <- NULL
+    if (!is.null(emm)) {
+      pairs_df <- tryCatch(
+        as.data.frame(pairs(emm, adjust = "tukey")),
+        error = function(e) {
+          warning("pairs() failed for ", resp, " : ", e$message)
+          NULL
+        }
+      )
+    }
+    
+    # Print outputs to sink (if present)
+    print(summary(model))
+    if (!is.null(anova_tab)) print(anova_tab)
+    if (!is.null(emm)) print(emm)
+    if (!is.null(pairs_df)) print(pairs_df)
+    
+    # Return a list of the results to be stored
+    list(
+      success = TRUE,
+      model = model,
+      model_summary = model_summary,
+      anova = anova_tab,
+      emm = emm,
+      pairs = pairs_df
+    )
+    
+  }, error = function(e) {
+    # If model fitting itself fails, capture the error but continue
+    warning("Model fit failed for ", resp, " : ", e$message)
+    list(success = FALSE, error = e$message)
+  })
+  
+  # Store in results_list under the response name
+  results_list[[resp]] <- fit_res
+} # end loop
+
+sink()  # stop capturing output
+
+
+##
+
+# Save results for later (useful for excel export)  
+saveRDS(results_list, file = "results_list_mixed_models_Nit_eff_8C.rds")
+
+wb <- createWorkbook()
+for (resp in names(results_list)) {
+  res <- results_list[[resp]]
+  if (!is.null(res) && isTRUE(res$success)) {
+    addWorksheet(wb, resp)
+    writeData(wb, resp, paste("Model Summary for", resp), startRow = 1)
+    if (!is.null(res$model_summary)) writeData(wb, resp, res$model_summary, startRow = 2)
+    start_row <- ifelse(is.null(res$model_summary), 5, nrow(res$model_summary) + 5)
+    writeData(wb, resp, paste("Estimated Marginal Means for", resp), startRow = start_row)
+    if (!is.null(res$emm)) writeData(wb, resp, as.data.frame(res$emm), startRow = start_row + 1)
+    if (!is.null(res$pairs)) {
+      start_row2 <- start_row + 1 + nrow(as.data.frame(res$emm))
+      writeData(wb, resp, "Pairwise Contrasts (Tukey)", startRow = start_row2)
+      writeData(wb, resp, res$pairs, startRow = start_row2 + 1)
+    }
+  } else {
+    # optional: create a sheet explaining failure
+    addWorksheet(wb, resp)
+    writeData(wb, resp, paste("Model failed for", resp, ":", res$error), startRow = 1)
+  }
+}
+saveWorkbook(wb, "Mixed_Model_Results_Nit_eff_8C.xlsx", overwrite = TRUE)
+
+
+### Fit into wide format table 
+
+# Robust helper to extract p-values for Treatment, Period and Treatment:Period
+get_pvals <- function(response_name, data = df,
+                      formula_template = "{resp} ~ Treatment * Period + (1|Animal_No)",
+                      REML = FALSE) {
+  # Build formula
+  form <- as.formula(glue::glue(formula_template, resp = response_name))
+  
+  # Fit model (try a few times if needed)
+  model <- tryCatch(
+    lme4::lmer(form, data = data, REML = REML),
+    error = function(e) {
+      warning("lmer failed for ", response_name, " : ", e$message)
+      return(NULL)
+    }
+  )
+  
+  if (is.null(model)) {
+    return(tibble::tibble(
+      Response = response_name,
+      p_Treatment = NA_real_,
+      p_Period = NA_real_,
+      p_Interaction = NA_real_,
+      note = "model_failed"
+    ))
+  }
+  
+  # Try extracting ANOVA (type III preferable). Try multiple fallbacks to be robust.
+  anova_tab <- NULL
+  anova_note <- NULL
+  # 1) try lmerTest::anova (Type III, Satterthwaite ddf)
+  anova_tab <- tryCatch({
+    # lmerTest::anova will usually return a data.frame / matrix with a p-value column
+    lmerTest::anova(model, type = 3, ddf = "Satterthwaite")
+  }, error = function(e) {
+    anova_note <<- paste("lmerTest::anova failed:", e$message)
+    NULL
+  })
+  
+  # 2) fallback to car::Anova (Type III)
+  if (is.null(anova_tab)) {
+    anova_tab <- tryCatch({
+      car::Anova(model, type = 3)
+    }, error = function(e) {
+      anova_note <<- paste(anova_note, " ; car::Anova failed:", e$message)
+      NULL
+    })
+  }
+  
+  # 3) fallback to stats::anova (may give LR/Chisq; often missing p-values)
+  if (is.null(anova_tab)) {
+    anova_tab <- tryCatch({
+      stats::anova(model)
+    }, error = function(e) {
+      anova_note <<- paste(anova_note, " ; stats::anova failed:", e$message)
+      NULL
+    })
+  }
+  
+  # If still no anova, return NA pvals
+  if (is.null(anova_tab)) {
+    return(tibble::tibble(
+      Response = response_name,
+      p_Treatment = NA_real_,
+      p_Period = NA_real_,
+      p_Interaction = NA_real_,
+      note = paste("anova_failed:", anova_note)
+    ))
+  }
+  
+  # Make sure anova_tab is a data frame and rownames are accessible
+  anova_df <- as.data.frame(anova_tab)
+  rownames_vec <- rownames(anova_df)
+  
+  # Find a suitable p-value column (common names)
+  p_col_candidates <- intersect(c("Pr(>F)", "Pr(>Chisq)", "Pr...F.", "Pr...Chisq.", "p.value", "Pr(>F)"), colnames(anova_df))
+  if (length(p_col_candidates) == 0) {
+    # more general search for column containing "Pr" or "p"
+    p_col_candidates <- grep("Pr|p\\.value|p.value|pval|P", colnames(anova_df), value = TRUE, ignore.case = TRUE)
+  }
+  p_col <- if (length(p_col_candidates) > 0) p_col_candidates[1] else NA_character_
+  
+  extract_p <- function(term_name) {
+    # try exact match in rownames; if not found, try grepping
+    idx <- which(rownames_vec == term_name)
+    if (length(idx) == 0) idx <- grep(paste0("^", term_name, "$"), rownames_vec, ignore.case = TRUE)
+    if (length(idx) == 0) idx <- grep(term_name, rownames_vec, ignore.case = TRUE)
+    if (length(idx) == 0) return(NA_real_)
+    if (is.na(p_col)) return(NA_real_)
+    val <- anova_df[idx[1], p_col]
+    as.numeric(val)
+  }
+  
+  p_Treatment <- extract_p("Treatment")
+  p_Period <- extract_p("Period")
+  p_Interaction <- extract_p("Treatment:Period")
+  
+  # Some anova outputs list the interaction as "Treatment:Period" or "Period:Treatment"
+  if (is.na(p_Interaction)) {
+    p_Interaction <- extract_p("Period:Treatment")
+  }
+  
+  # Final tidy tibble
+  res <- tibble::tibble(
+    Response = response_name,
+    p_Treatment = p_Treatment,
+    p_Period = p_Period,
+    p_Interaction = p_Interaction,
+    note = ifelse(is.null(anova_note), NA_character_, anova_note)
+  )
+  return(res)
+}
+
+res
+# List of response variables
+responses <- names(df)[which(names(df) == "Milk") : ncol(df)]
+
+responses
+
+# Compute p-values
+pvals <- map_df(responses, get_pvals)
+
+head(pvals)
+
+# 2. Compute Mean ± SD by Treatment
+desc <- df %>%
+  pivot_longer(all_of(responses), names_to = "Response", values_to = "Value") %>%
+  group_by(Response, Treatment) %>%
+  summarise(
+    Mean = mean(Value, na.rm = TRUE),
+    SD   = sd(Value, na.rm = TRUE),
+    n    = n(),
+    SE   = SD / sqrt(n),
+    Mean_SD = sprintf("%.2f ± %.2f", Mean, SD),
+    .groups = "drop"
+  )
+
+head(desc)
+
+# 3. Reshape wide
+table_wide <- desc %>%
+  dplyr::select(Response, Treatment, Mean_SD) %>%
+  pivot_wider(
+    names_from = Treatment,
+    values_from = Mean_SD
+  )
+
+# 4. Add SE column
+se_vals <- desc %>%
+  group_by(Response) %>%
+  summarise(SE = mean(SE), .groups = "drop")
+
+# 5. Combine descriptive stats + p-values
+final_table <- table_wide %>%
+  dplyr::left_join(se_vals, by = "Response") %>%
+  dplyr::left_join(pvals, by = "Response") %>%
+  dplyr::select(Response, CON, HE, XHE, SE,
+                p_Treatment, p_Period, p_Interaction)
+
+print(final_table)
+
+# Export to CSV
+write.csv(final_table, "E55_interaction_stats_table_Nit_Eff_8C.csv", row.names = FALSE)
+
+### Compact letter generation. Compact letter generated for response variable 'UN' which wasn't deemed significantly different from earlier tests. Please explain reasoning. 
+
+
+check_assumptions <- function(model, data, response, treatment_var = "Treatment") {
+  
+  cat("\n\n==============================\n")
+  cat("Assumption checks for:", response, "\n")
+  cat("==============================\n")
+  
+  # Extract residuals
+  res <- residuals(model)
+  
+  # Shapiro–Wilk normality test
+  cat("\nShapiro-Wilk Normality Test:\n")
+  print(shapiro.test(res))
+  
+  # QQ-plot
+  qqnorm(res); qqline(res, col = "red")
+  
+  # Homogeneity of variance
+  cat("\nLevene Test (Homogeneity of Variance across Treatment):\n")
+  levene_formula <- as.formula(paste(response, "~", treatment_var))
+  print(leveneTest(levene_formula, data = data))
+}
+
+
+results <- list()
+
+for (resp in response_vars) {
+  
+  # Construct model formula
+  form <- as.formula(paste(resp, "~ Treatment + Period + (1|Animal_No)"))
+  
+  # Fit mixed model
+  model <- lmer(form, data = df)
+  
+  # Save model
+  results[[resp]] <- model
+  
+  # Print summary
+  cat("\n\n====================================================\n")
+  cat("Linear Mixed Model for:", resp, "\n")
+  cat("====================================================\n")
+  print(summary(model))
+  
+  # Assumption checks
+  check_assumptions(model, df, resp)
+  
+  # Estimated marginal means for Treatment
+  em <- emmeans(model, ~ Treatment)
+  
+  # Compact letter display (Treatment only)
+  cat("\nCompact Letter Display (Treatment differences):\n")
+  print(cld(em, Letters = letters))
+}
+
+
+cld_list <- lapply(names(results), function(resp) {
+  model <- results[[resp]]
+  em <- emmeans(model, ~ Treatment)
+  cld_table <- cld(em, Letters = letters)
+  cld_table$response <- resp
+  return(cld_table)
+})
+
+cld_output <- bind_rows(cld_list)
+
+write.csv(cld_output, "Treatment_CLD_results_nit_eff_8C.csv", row.names = FALSE)
+
+
+
+
+
+
+

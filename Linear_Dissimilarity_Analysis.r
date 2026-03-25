@@ -1,86 +1,367 @@
-# Linear Dissimilarity Analysis code. The below was used to complete all of the LDA pairs. The example provied is for CON vs XHE treatments at genus level. 
+## Script for PCA, PCoA and alpha diversity plots / stats (Genus level)
 
-# Combind dataframes
-CONXHE_data <- rbind(con_data,xhe_data)
+## PCA plot
 
-# Select taxonomic data (treatment name = column 1 and features from column 2)
-X3 <- CONXHE_data[, 2:ncol(CONXHE_data)]
-# Ensure that treatment column contains all relevant levels for pairwise comparisons
-y3 <- as.factor(CONXHE_data[, 1]) 
+Data <- Genus_data
 
-# Remove columns with zero variance
-non_zero_var_columns3 <- apply(X3, 2, sd) != 0
-X3 <- X3[, non_zero_var_columns3]
+# Ensure columns representing genera are numeric and exclude non-numeric columns (metadata)
+pca_data <- Data %>%
+  select(-Sample_ID, -Treatment, -Feeding_period, -Cow_ID) %>%
+  mutate(across(everything(), as.numeric))
 
-# Check for collinearity
-cor_matrix3 <- cor(X3)
-high_corr_features3 <- findCorrelation(cor_matrix3, cutoff = 0.9)  # Adjust cutoff as needed
-X_filtered3 <- X3[, -high_corr_features3]  # Remove highly correlated features
+# Apply log transformation to the numeric data (add 1 to avoid log(0))
+pca_data_log <- pca_data %>%
+  mutate(across(everything(), ~log(. + 1)))
 
-# Create a data frame with the taxonomic features and treatment labels for ANOVA
-anova_data3 <- data.frame(Treatment = y3, X_filtered3)
+# Perform PCA on the log-transformed data
+pca_result <- prcomp(pca_data_log, scale. = FALSE)
 
-# Perform pairwise comparisons using ANOVA and Tukey's HSD for each feature
-anova_results3 <- lapply(names(anova_data3[, -1]), function(feature) {
-  formula3 <- as.formula(paste(feature, "~ Treatment"))
-  anova_model3 <- aov(formula3, data = anova_data3)
-  tukey_result3 <- TukeyHSD(anova_model3)
+# Extract variance explained by each principal component
+explained_variance <- summary(pca_result)$importance[2, ] * 100
+
+# Extract PCA scores and combine with metadata
+pca_scores <- as.data.frame(pca_result$x)
+pca_scores <- cbind(Data %>% select(Sample_ID, Treatment, Cow_ID, Feeding_period), pca_scores)
+
+pca_scores$Color <- factor(pca_scores$Treatment, levels = c("BASE", "CON", "HE", "XHE"),
+                           labels = c("#FF6600", "#333FFC", "#CC0099", "#00CCFF"))
+
+#NOELLIPSE Plot with custom colors and shapes
+PCA_E55_Genus <- ggplot(pca_scores, aes(x = PC1, y = PC2)) +
+  geom_point(aes(color = Treatment, shape = Feeding_period), size = 3, alpha = 0.7) +  # Plot points
+  #stat_ellipse(type = "norm", aes(group = Med, color = Med), level = 0.95, linetype = "dotted") +  # Dotted ellipses
+  labs(
+    title = "a) PCA - Genus",
+    x = paste0("PC1 (", round(explained_variance[1], 1), "% variance)"),
+    y = paste0("PC2 (", round(explained_variance[2], 1), "% variance)")
+  ) +
+  scale_color_manual(values = c("BASE" = "#FF6600", "CON" = "#333FFC", "HE" = "#CC0099", "XHE" ="#00CCFF")) +  # Custom colors
+  theme_bw() +  # Minimal theme
+  theme(
+    legend.position = "right",  # Remove legend title
+    plot.title = element_text(hjust = 0)
+  )
+
+## Top 10 contributors to PC1 and PC2 plot
+
+# Extract loadings
+loadings <- as.data.frame(pca_result$rotation)
+loadings$Taxa <- rownames(loadings)
+
+# Top 10 for PC1
+top10_PC1 <- loadings %>%
+  arrange(desc(abs(PC1))) %>%
+  slice(1:10)
+
+# Top 10 for PC2
+top10_PC2 <- loadings %>%
+  arrange(desc(abs(PC2))) %>%
+  slice(1:10)
+
+top10_PC1$PC <- "a) PC1"
+top10_PC2$PC <- "b) PC2"
+
+top10_combined <- bind_rows(top10_PC1, top10_PC2)
+
+top10_long <- top10_combined %>%
+  select(Taxa, PC, PC1, PC2) %>%
+  mutate(Value = ifelse(PC == "PC1", PC1, PC2))
+
+Top10_PCA_loadings_plot <- ggplot(top10_long, aes(x = reorder(Taxa, Value), y = Value, fill = PC)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  facet_wrap(~PC, scales = "free_y") +
+  theme_bw() +
+  labs(
+    x = "Genera",
+    y = "Loading value"
+  ) +
+  theme(
+    plot.title = element_text(hjust = 0),
+    strip.text = element_text(hjust = 0),
+    legend.position = "none"
+  )
+
+print(Top10_PCA_loadings_plot)
+
+
+## BetaDiv plot Genus
+
+
+# Dynamically select species columns (from column 5 onwards)
+species_columns <- Data[, 5:ncol(Data)]  # Select all columns from the 5th to the last
+
+#Log Transform the species columns (avoid log(0) by adding 1)
+species_log <- species_columns + 1  # Add 1 to avoid log(0)
+species_log <- log(species_log)
+
+# Calculate Bray-Curtis Dissimilarity using vegan's vegdist function
+bray_curtis <- vegdist(species_log, method = "bray")
+
+# Perform PCoA using the dissimilarity matrix
+pcoa <- cmdscale(bray_curtis, k = 2, eig = TRUE)  # k = 2 for two principal coordinates, eig = TRUE to return eigenvalues
+
+# Create a data frame for plotting with the PCoA results and other metadata
+pcoa_df <- data.frame(PCoA1 = pcoa$points[, 1], PCoA2 = pcoa$points[, 2], 
+                      Treatment = Data$Treatment, Sample_ID = Data$Sample_ID, Feeding_period = Data$Feeding_period, Cow_ID = Data$Cow_ID)
+
+# Calculate the percentage variance explained for the first two principal coordinates
+# This is based on the eigenvalues (distances)
+eigenvalues <- pcoa$eig
+explained_variance <- eigenvalues / sum(eigenvalues) * 100
+
+#  Plot the PCoA results with custom colors and shapes, and ellipses
+Beta_div_E55_Fam <- ggplot(pcoa_df, aes(x = PCoA1, y = PCoA2)) +
+  geom_point(aes(color = Treatment, shape = Feeding_period), size = 3, alpha = 0.7) +
+  stat_ellipse(
+    aes(group = Treatment, color = Treatment),
+    type = "norm",
+    level = 0.95,
+    linetype = "dashed"
+  ) +  # Dotted ellipses
+  labs(
+    title = "b) PCoA - Genus",
+    x = paste0("PC1 (", round(explained_variance[1], 1), "% variance)"),
+    y = paste0("PC2 (", round(explained_variance[2], 1), "% variance)")
+  ) +
+  scale_color_manual(values = c("BASE" = "#FF6600", "CON" = "#333FFC", "HE" = "#CC0099", "XHE" ="#00CCFF")) + 
+  theme_bw() +  # Minimal theme
+  theme(
+    legend.position = "right",  # Remove legend title
+    plot.title = element_text(hjust = 0)
+  )
+
+# print combined plot 
+
+Genus_PCA_PCoA_E55_plot <- ggarrange(
+  PCA_E55_Genus,
+  Beta_div_E55_Fam,
+  ncol = 1, nrow = 2,
+  common.legend = TRUE,
+  legend = "right"
+)
+
+# Save the plot
+ggsave("braycurtis_PCA_Genus_ellipses.png", width = 10, height = 8, dpi = 600)
+
+## PERMANOVA analysis for PCoA 
+set.seed(123)
+adonis_result <- adonis2(bray_curtis ~ Treatment, data = Data, permutations = 9999)
+
+adonis_pvalue <- adonis_result$`Pr(>F)`[1]  # Extract p-value from the result
+adonis_r2 <- adonis_result$R2[1]  # Extract R² value for the model
+
+adonis_pvalue ## 0.011
+adonis_r2 ## 0.0824
+
+Data$Treatment <- as.factor(Data$Treatment)
+
+## Pairwise analysis of PCoA using new version of R
+pairwise_adonis2 <- function(dist_matrix, factor_vector, nperm = 999) {
+  library(vegan)
   
-  # Convert the Tukey's HSD result into a data frame for easier tabulation
-  tukey_df3 <- as.data.frame(tukey_result3$Treatment)
-  tukey_df3$Feature <- feature  # Associate the taxonomic feature name
-  return(tukey_df3)
-})
+  # Convert dist object to matrix if needed
+  if (inherits(dist_matrix, "dist")) {
+    dist_matrix <- as.matrix(dist_matrix)
+  }
+  
+  groups <- unique(factor_vector)
+  results <- data.frame(
+    Group1 = character(),
+    Group2 = character(),
+    R2 = numeric(),
+    p_value = numeric(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (i in 1:(length(groups) - 1)) {
+    for (j in (i + 1):length(groups)) {
+      g1 <- groups[i]
+      g2 <- groups[j]
+      
+      subset_idx <- factor_vector %in% c(g1, g2)
+      
+      sub_dist <- dist_matrix[subset_idx, subset_idx]
+      sub_factor <- droplevels(factor_vector[subset_idx])
+      
+      ad <- adonis2(sub_dist ~ sub_factor, permutations = nperm)
+      
+      results <- rbind(
+        results,
+        data.frame(
+          Group1 = g1,
+          Group2 = g2,
+          R2 = ad$R2[1],
+          p_value = ad$`Pr(>F)`[1]
+        )
+      )
+    }
+  }
+  
+  return(results)
+}
 
-# Combine individual feature results into a single table
-pairwise_comparisons_table3 <- do.call(rbind, anova_results3)
+set.seed(123)
+pairwise_result <- pairwise_adonis2(bray_curtis, Data$Treatment, nperm = 9999)
 
-# Perform LDA
-lda_model3 <- lda(X_filtered3, grouping = y3)
+pairwise_result
 
-# Display the LDA model summary
-print(summary(lda_model3))
+## alpha diversity plots
 
-# Extract linear discriminant coefficients from the LDA model
-scaling_dfBaseCON <- as.data.frame(lda_model3$scaling)
-scaling_dfBaseCON$Feature <- rownames(scaling_dfBaseCON)
+# Select taxa columns for diversity calculations (all genus columns)
+Genus_data <- Data[, 5:ncol(Data)]  
 
-# Add a column to determine association based on the sign of the coefficient
-scaling_dfBaseCON$Association <- ifelse(scaling_dfBaseCON[,1] > 0, "CON", "XHE")
+# Round genus data to integers ONLY for Chao1 calculation
+Genus_data_rounded <- Genus_data %>%
+  mutate(across(everything(), ~ round(.)))  # Round all genus columns to integers
 
-# Filter scaling data to keep only significant features
-scaling_melt_filtered3 <- melt(scaling_dfBaseCON, id.vars = c("Feature", "Association"))
+# Convert rounded data to a matrix, as required by `estimateR()`
+Genus_data_rounded_matrix <- as.matrix(Genus_data_rounded)
 
-# Merge p-values into the melted scaling data frame using the correct feature name
-scaling_melt_filtered3 <- merge(scaling_melt_filtered3, 
-                                pairwise_comparisons_table3[, c("Feature", "p adj")], 
-                                by = "Feature", 
-                                all.x = TRUE)
+# Ensure rows are samples and columns are taxa
+if (!is.numeric(Genus_data_rounded_matrix)) {
+  stop("The data contains non-numeric values. Please ensure only numeric values are present.")
+}
 
-# Rename 'p adj' to 'p_adj'
-colnames(scaling_melt_filtered3)[colnames(scaling_melt_filtered3) == "p adj"] <- "p_adj"
+# Calculate Chao1 index using the rounded genus data
+chao1_index <- estimateR(Genus_data_rounded_matrix)["S.chao1", ]  
 
-# Ensure p_adj is numeric and round it for better readability
-scaling_melt_filtered3$p_adj <- round(as.numeric(as.character(scaling_melt_filtered3$p_adj)), 3)
+# Calculate Inverse Simpson index (Inverse of the Simpson index) using original data
+inverse_simpson_index <- 1 / diversity(Genus_data, index = "simpson")
 
-# Filter out features with p_adj >= 0.1 (keep only significant features)
-scaling_melt_filtered3 <- scaling_melt_filtered3[scaling_melt_filtered3$p_adj < 0.05, ]
+# Calculate Shannon index using original data
+shannon_index <- diversity(Genus_data, index = "shannon")
 
-# Plot with p-values displayed 
-CONXHE_genus_lda <- ggplot(scaling_melt_filtered3, aes(y = reorder(Feature, value), x = value, fill = Association)) +
-  geom_bar(stat = "identity", position = "dodge") +
-  geom_text(aes(label = ifelse(!is.na(p_adj), p_adj, "")),  # Show p-values where available
-            hjust = -0.2,  # Adjust to position the text outside the bars
-            size = 3,      # Adjust text size for readability
-            color = "black") +
-  labs(title = "b) CON ~ XHE",
-       y = "Genus",
-       x = "LDA Score") +
-  theme(axis.text.y = element_text(hjust = 1)) +
-  scale_fill_manual(values = c("CON" = "#333FFC", "XHE" = "#00CCFF")) +
-  scale_x_continuous(limits = c(-0.75, 0.75)) +  # Set x-axis limits
-  guides(fill = guide_legend(title = "Treatment", position = "bottom")) +
-  theme_light()
-print(CONXHE_genus_lda)
+# Calculate Simpson index 
+simpson_index <- diversity(Genus_data, index = "simpson")
+
+# Combine indices into a data frame
+indices_df <- data.frame(
+  Sample = Data$Sample_ID,
+  Treatment = Data$Treatment,
+  Feeding_period = Data$Feeding_period,
+  Cow_ID = Data$Cow_ID,
+  Chao1 = chao1_index,  
+  Inverse_Simpson = inverse_simpson_index,  
+  Simpson = simpson_index, 
+  Shannon = shannon_index  
+)
+
+
+## alpha diversity stats
+
+alpha_long <- indices_df_long %>%
+  filter(Index %in% c("Shannon", "Simpson", "Inverse_Simpson", "Chao1"))
+
+normality_results <- alpha_long %>%
+  group_by(Index) %>%
+  shapiro_test(Value)
+
+normality_results
+variance_results <- alpha_long %>%
+  group_by(Index) %>%
+  levene_test(Value ~ Treatment)
+
+variance_results
+
+
+## based on the results non-parametric for all alpha indexes
+
+## Chao1
+
+kruskal_result <- kruskal.test(chao1_index ~ Treatment, data = indices_df)
+kruskal_p_value <- kruskal_result$p.value
+
+print(kruskal_p_value)
+
+## P = 0.0772
+
+## Shannon
+
+kruskal_result <- kruskal.test(shannon_index ~ Treatment, data = indices_df)
+kruskal_p_value <- kruskal_result$p.value
+
+print(kruskal_p_value)
+
+## P = 0.4613
+
+## Inverse Simp
+
+kruskal_result <- kruskal.test(inverse_simpson_index ~ Treatment, data = indices_df)
+kruskal_p_value <- kruskal_result$p.value
+
+print(kruskal_p_value)
+
+## p = 0.9577
+
+## Simpson 
+
+kruskal_result <- kruskal.test(simpson_index ~ Treatment, data = indices_df)
+kruskal_p_value <- kruskal_result$p.value
+
+print(kruskal_p_value)
+
+## p = 0.9577
+
+# Melt the data for plotting
+indices_df_long <- indices_df %>%
+  gather(key = "Index", value = "Value", Shannon, Simpson, Inverse_Simpson, Chao1)
+
+indices_df_long$Index <- factor(
+  indices_df_long$Index,
+  levels = c("Shannon", "Simpson", "Inverse_Simpson", "Chao1")
+)
+
+## plot labels with P values as subheadings
+index_labels <- c(
+  "Shannon" = "a) Shannon<br><span style='font-size:10pt;'>P = 0.4613</span>",
+  "Simpson" = "b) Simpson<br><span style='font-size:10pt;'>P = 0.9577</span>",
+  "Inverse_Simpson" = "c) Inverse Simpson<br><span style='font-size:10pt;'>P = 0.9577</span>",
+  "Chao1" = "d) Chao1<br><span style='font-size:10pt;'>P = 0.0772</span>"
+)
+
+
+# Plot the indices using ggplot2
+Alpha_Genus_E55 <- ggplot(indices_df_long, aes(x = Treatment, y = Value, fill = Treatment)) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+  geom_point(
+    aes(color = Treatment),
+    size = 1.5,
+    alpha = 0.6,
+    position = position_dodge(0)
+  ) +
+  scale_color_manual(values = c("BASE" = "#FF6600", "CON" = "#333FFC", "HE" = "#CC0099", "XHE" ="#00CCFF")) + 
+  scale_fill_manual(values = c(
+    "BASE" = "#FF6600", "CON" = "#333FFC", "HE" = "#CC0099", "XHE" ="#00CCFF"
+  )) +
+  facet_wrap(~Index, scales = "free_y", labeller = labeller(Index = index_labels)) +
+  theme_bw() +
+  labs(
+    x = "",
+    y = "Index Value"
+  ) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 0, size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    plot.title = element_text(size = 14, hjust = 0),
+    axis.line = element_line(color = "black", linewidth = 0.5),
+    axis.ticks = element_line(color = "black", linewidth = 0.5),
+    strip.text.x = element_markdown(
+      size = 12,   # main label size
+      hjust = 0,
+      lineheight = 1.1
+    ),
+    strip.background = element_blank(),
+    strip.placement = "outside"
+  )
+print(Alpha_Genus_E55)
+
+ggsave("alpha_Genus.png", width = 14, height = 8, dpi = 600)
+
+
+
 
 
